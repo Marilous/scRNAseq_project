@@ -1,0 +1,845 @@
+---
+title: "Какие делящиеся Т клетки находятся в микроокружении опухоли?"
+output:
+  html_document:
+    fig_caption: yes
+  pdf_document: default
+---
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(SeuratObject)
+library(Seurat)
+library(BPCells)
+library(presto)
+#library(glmGamPoi)
+library(patchwork)
+library(dplyr)
+library(ggplot2)
+library(harmony)
+library(DoubletFinder)
+library(anndata)
+library(celldex)
+library(SingleR)
+library(reticulate)
+library(umap)
+library(dbplyr)
+```
+
+```{r eval=FALSE, include=FALSE}
+# setRepositories(ind = 1:3, addURLs = c('https://satijalab.r-universe.dev', 'https://bnprks.r-universe.dev/'))
+# install.packages(c("BPCells", "presto", "glmGamPoi"))
+```
+
+```{r eval=FALSE, include=FALSE}
+# install.packages('Signac')
+# remotes::install_github("satijalab/seurat-data", quiet = TRUE)
+# remotes::install_github("satijalab/azimuth", quiet = TRUE)
+# remotes::install_github("satijalab/seurat-wrappers", quiet = TRUE)
+```
+
+```{r eval=FALSE, include=FALSE}
+# Load the PBMC dataset
+# pbmc.data <- Read10X(data.dir = "C:/Users/gs66/Documents/R/hg19/")
+# # Initialize the Seurat object with the raw (non-normalized data).
+# pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+# pbmc
+```
+
+# Загрузка данных
+
+Были выбраны 6 пациентов, у которых выполнялся scRNAseq до терапии ингибиторами иммунных контрольных точек.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+P18.pre <- Read10X_h5(filename = "C:/Users/gs66/Documents/R/geo1/GSM6048142_raw_feature_bc_matrix_P18_pre-Tx_GEX_sc_tumor.h5", use.names = T)
+P23.pre <- Read10X_h5(filename = "C:/Users/gs66/Documents/R/geo1/GSM6048143_raw_feature_bc_matrix_P23_pre-Tx_GEX_sc_tumor.h5", use.names = T)
+P24.pre <- Read10X_h5(filename = "C:/Users/gs66/Documents/R/geo1/GSM6048144_raw_feature_bc_matrix_P24_pre-Tx_GEX_sc_tumor.h5", use.names = T)
+P27.pre <- Read10X_h5(filename = "C:/Users/gs66/Documents/R/geo1/GSM6048145_raw_feature_bc_matrix_P27_pre-Tx_GEX_sc_tumor.h5", use.names = T)
+P29.pre <- Read10X_h5(filename = "C:/Users/gs66/Documents/R/geo1/GSM6048146_raw_feature_bc_matrix_P29_pre-Tx_GEX_sc_tumor.h5", use.names = T)
+P32.pre <- Read10X_h5(filename = "C:/Users/gs66/Documents/R/geo1/GSM6048147_raw_feature_bc_matrix_P32_pre-Tx_GEX_sc_tumor.h5", use.names = T)
+
+# ctrl.5 <- Seurat::Read10X_h5(filename = "data/raw/Normal_PBMC_5.h5", use.names = T)
+# ctrl.13 <- Seurat::Read10X_h5(filename = "data/raw/Normal_PBMC_13.h5", use.names = T)
+# ctrl.14 <- Seurat::Read10X_h5(filename = "data/raw/Normal_PBMC_14.h5", use.names = T)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+options(Seurat.object.assay.version = "v3")
+```
+
+Cоздания Seurat объекта. Дообавляем метки наборов данных как cell.ids на тот случай, если у нас есть перекрывающиеся баркоды между наборами данных.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+sdata.P18.pre <- CreateSeuratObject(P18.pre, project = "P18_pre", min.cells = 3, min.features = 200)
+sdata.P23.pre <- CreateSeuratObject(P23.pre, project = "P23_pre", min.cells = 3, min.features = 200)
+sdata.P24.pre <- CreateSeuratObject(P24.pre, project = "P24_pre", min.cells = 3, min.features = 200)
+sdata.P27.pre <- CreateSeuratObject(P27.pre, project = "P27_pre", min.cells = 3, min.features = 200)
+sdata.P29.pre <- CreateSeuratObject(P29.pre, project = "P29_pre", min.cells = 3, min.features = 200)
+sdata.P32.pre <- CreateSeuratObject(P32.pre, project = "P32_pre", min.cells = 3, min.features = 200)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# add metadata
+sdata.P18.pre$type = "Pre"
+sdata.P23.pre$type = "Pre"
+sdata.P24.pre$type = "Pre"
+sdata.P27.pre$type = "Pre"
+sdata.P29.pre$type = "Pre"
+sdata.P32.pre$type = "Pre"
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Merge datasets into one single seurat object
+tumor <- merge(sdata.P18.pre, c(sdata.P23.pre, sdata.P24.pre, sdata.P27.pre, sdata.P29.pre,
+    sdata.P32.pre), add.cell.ids = c("P18_pre", "P23_pre", "P24_pre", "P27_pre",
+    "P29_pre", "P32_pre"))
+
+tumor
+```
+
+```{r eval=FALSE, include=FALSE}
+# as.data.frame(tumor@assays$RNA@layers$counts[1:10, 1:2])
+# head(tumor@meta.data, 10)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# remove all objects that will not be used.
+rm(P18.pre, P23.pre, P24.pre, P27.pre, P29.pre, P32.pre, sdata.P18.pre, sdata.P23.pre, sdata.P24.pre, sdata.P27.pre, sdata.P29.pre, sdata.P32.pre)
+
+# run garbage collect to free up memory
+gc()
+```
+
+# Контроль качества и выбор клеток для дальнейшего анализа
+
+Рассчитаем процент митохондриальных и рибосомальных генов на клетку и добавим к метаданным.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+tumor[["percent.mt"]] <- PercentageFeatureSet(tumor, pattern = "^MT-")
+tumor[["percent.rb"]] <- PercentageFeatureSet(tumor, pattern = "^RP[SL]")
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+head(tumor@meta.data, 25)
+```
+
+"Высокие пропорции указывают на клетки низкого качества (Islam et al. 2014; Ilicic et al. 2016), возможно, из-за потери цитоплазматической РНК из перфорированных клеток. Причина в том, что митохондрии крупнее отдельных молекул транскриптов и с меньшей вероятностью выходят через разрывы клеточной мембраны."
+
+Визуализируем показатели контроля качества и используем их для фильтрации.
+
+```{r echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+VlnPlot(tumor, group.by = "orig.ident", features = c("nFeature_RNA", "nCount_RNA"), pt.size = 0.1, ncol = 3)
+```
+
+```{r echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+# Visualize QC metrics as a violin plot
+VlnPlot(tumor, group.by = "orig.ident", features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb"), pt.size = 0.1, ncol = 2)
+```
+
+Поскольку рибосомальные белки имеют высокую экспрессию, они будут составлять большую часть транскрипционного ландшафта, когда будет обнаружено меньше генов с низкой экспрессией.
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#FeatureScatter(pbmc, feature1 = "nFeature_RNA", feature2 = "pANN_0.25_0.005_108")
+```
+
+```{r echo=TRUE, fig.height=13, fig.width=4.5, message=FALSE, warning=FALSE}
+# Visualize QC metrics as ridge plots
+RidgePlot(tumor, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol =1)
+```
+
+```{r echo=TRUE, fig.width=10, message=FALSE, warning=FALSE}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(tumor, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(tumor, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r eval=FALSE, include=FALSE}
+FeatureScatter(tumor, feature1 = "percent.rb", feature2 = "percent.mt")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+tumor <- subset(tumor, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 20)
+```
+
+Визуализируем показатели контроля качества после фильтрации.
+
+```{r echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+VlnPlot(tumor, features = c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rb"), ncol = 2, pt.size = 0.001)
+```
+
+"Поскольку уровень экспрессии митохондриальных генов и MALAT1 оценивается в основном как технический, было бы разумно удалить их из набора данных перед дальнейшим анализом."
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Filter MALAT1
+tumor <- tumor[!grepl("MALAT1", rownames(tumor)), ]
+
+# Filter Mitocondrial
+tumor <- tumor[!grepl("^MT-", rownames(tumor)), ]
+
+dim(tumor)
+```
+
+# Нормализация данных
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+tumor <- NormalizeData(tumor, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+```
+
+Выбирем 10 000 чтений из большой матрицы экспрессии генов, чтобы визуализировать распределение экспрессии генов до и после нормализации отдельно (нули не включены).
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# set seed and put two plots in one figure
+set.seed(123)
+par(mfrow=c(1,2))
+
+# original expression distribution
+raw_geneExp = as.vector(tumor@assays$RNA$counts) %>% sample(10000)
+raw_geneExp = raw_geneExp[raw_geneExp != 0]
+hist(raw_geneExp)
+
+# expression distribution after normalization
+logNorm_geneExp = as.vector(tumor@assays$RNA$data) %>% sample(10000)
+logNorm_geneExp = logNorm_geneExp[logNorm_geneExp != 0]
+hist(logNorm_geneExp)
+```
+
+## Затем мы вычисляем подмножество признаков, которые демонстрируют высокие различия между клетками в наборе данных (т. е. они высоко выражены в одних клетках и слабо выражены в других). Сосредоточение внимания на этих генах в дальнейшем анализе помогает выделить биологический сигнал в наборе данных.
+
+```{r echo=TRUE, fig.width=15, message=FALSE, warning=FALSE}
+tumor <- FindVariableFeatures(tumor, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(tumor), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(tumor)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+## Скейлинг данных
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+all.genes <- rownames(tumor)
+tumor <- ScaleData(tumor, features = all.genes)
+
+#tumor <- ScaleData(tumor, vars.to.regress = c("nFeature_RNA", "percent.mt"))
+```
+
+## Линейное уменьшение размеров
+
+```{r echo=TRUE}
+tumor <- RunPCA(tumor, features = VariableFeatures(object = tumor))
+
+#tumor = RunPCA(tumor, dims = 1:10)
+```
+
+```{r echo=TRUE}
+# Examine and visualize PCA results a few different ways
+print(tumor[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+```{r echo=TRUE, fig.width=11, message=FALSE, warning=FALSE}
+VizDimLoadings(tumor, dims = 1:2, reduction = "pca")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+DimPlot(tumor, reduction = "pca") + NoLegend()
+```
+
+DimHeatmap(), позволяет легко исследовать основные источники неоднородности в наборе данных и может быть полезен при попытке решить, какие ГК включить для дальнейшего последующего анализа. И ячейки, и объекты упорядочены в соответствии с их оценками PCA. Установка cellsчисла отображает «крайние» ячейки на обоих концах спектра, что значительно ускоряет построение графиков для больших наборов данных.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+DimHeatmap(tumor, dims = 1:9, cells = 500, balanced = TRUE)
+```
+
+Построим график величины дисперсии, объясняемой каждым ГК.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+ElbowPlot(tumor)
+```
+
+```{r echo=TRUE, warning=FALSE}
+tumor = RunUMAP(tumor, dims = 1:18, umap.method = "umap-learn")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+DimPlot(tumor, reduction = "umap")
+```
+
+```{r eval=FALSE, include=FALSE}
+FeaturePlot(tumor, features = "percent.mt") & theme(plot.title = element_text(size=10))
+```
+
+```{r eval=FALSE, include=FALSE}
+FeaturePlot(tumor, features = "nFeature_RNA") & theme(plot.title = element_text(size=10))
+```
+
+## Поиск дублетов (Запустим DoubletFinder)
+
+DoubletFinder можно разбить на 4 этапа:
+
+(1) Создать искусственные дублеты из существующих данных scRNA-seq.
+
+(2) Предварительная обработка объединенных реальных и искусственных данных.
+
+(3) Выполните PCA и использование матрицы расстояний PC, чтобы найти долю искусственных k ближайших соседей (pANN) в каждой ячейке.
+
+(4) Порядок ранжирования и пороговые значения pANN в соответствии с ожидаемым количеством дублетов.
+
+DoubletFinder принимает следующие аргументы:
+
+seu \~ Это полностью обработанный объект Seurat (т. е. после запуска NormalizeData, FindVariableGenes, ScaleData, RunPCA и RunTSNE).
+
+PCs \~ Количество статистически значимых главных компонентов, заданное в виде диапазона (например, ПК = 1:10).
+
+pN \~ Определяет количество сгенерированных искусственных дублетов, выраженное как доля объединенных реальных и искусственных данных. По умолчанию установлено значение 25 %, исходя из наблюдения, что производительность DoubletFinder в значительной степени pN-инвариантна (см. McGinnis, Murrow and Gartner 2019, Cell Systems).
+
+pK \~ Определяет размер окрестности PC, используемый для вычисления pANN, выраженный как доля объединенных реальных и искусственных данных. По умолчанию не установлено, так как pK необходимо корректировать для каждого набора данных scRNA-seq. Оптимальные значения pK следует оценивать с использованием стратегии, описанной ниже.
+
+nExp \~ Определяет порог pANN, используемый для окончательных прогнозов дублетов/синглетов. Это значение лучше всего можно оценить по плотности загрузки клеток в устройство 10X/Drop-Seq и скорректировать в соответствии с предполагаемой долей гомотипических дублетов.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#Подбор параметра pK — https://github.com/chris-mcginnis-ucsf/DoubletFinder
+
+sweep.res <- paramSweep(tumor, PCs = 1:10, sct = FALSE)
+sweep.stats <- summarizeSweep(sweep.res, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+bcmvn
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+pK=as.numeric(as.character(bcmvn$pK))
+BCmetric=bcmvn$BCmetric
+pK_choose = pK[which(BCmetric %in% max(BCmetric))]
+
+par(mar=c(5,4,4,8)+1,cex.main=1.2,font.main=2)
+plot(x = pK, y = BCmetric, pch = 16,type="b",
+col = "blue",lty=1)
+abline(v=pK_choose,lwd=2,col='red',lty=2)
+title("The BCmvn distributions")
+text(pK_choose,max(BCmetric),as.character(pK_choose),pos = 4,col = "red")
+```
+
+## Запустим DoubletFinder
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+nExp <- round(ncol(tumor) * 0.04)  # для doublet rate 4% 
+tumor <- doubletFinder(tumor, pN = 0.25, pK = 0.005, nExp = nExp, PCs = 1:10)
+
+#tumor@meta.data$DF.classifications_0.25_0.005_867
+
+```
+
+```{r echo=TRUE}
+DimPlot(tumor, reduction = "umap", group.by = "DF.classifications_0.25_0.005_867")
+```
+
+```{r eval=FALSE, include=FALSE}
+#DimPlot(tumor, group.by = DF.name) + NoAxes()
+```
+
+```{r eval=FALSE, include=FALSE}
+FeatureScatter(tumor, feature1 = "nFeature_RNA", feature2 = "pANN_0.25_0.005_867")
+```
+
+Фильтрация дублетов
+
+```{r echo=TRUE}
+#Фильтрация дублетов
+tumor
+
+tumor = tumor[, tumor@meta.data[, "DF.classifications_0.25_0.005_867"] == "Singlet"]
+
+tumor
+```
+
+
+# Пересчитаем всё на данных с отфильтрованными даблетами
+
+```{r echo=TRUE}
+tumor <- FindVariableFeatures(tumor, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(tumor), 10)
+```
+
+```{r echo=TRUE}
+all.genes <- rownames(tumor)
+tumor <- ScaleData(tumor, features = all.genes)
+```
+
+```{r echo=TRUE}
+tumor <- RunPCA(tumor, features = VariableFeatures(object = tumor))
+```
+
+```{r echo=TRUE, fig.width=11, message=FALSE, warning=FALSE}
+VizDimLoadings(tumor, dims = 1:2, reduction = "pca")
+```
+
+```{r echo=TRUE}
+DimPlot(tumor, reduction = "pca") + NoLegend()
+```
+
+```{r include=FALSE}
+ElbowPlot(tumor)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+tumor = RunUMAP(tumor, dims = 1:18, umap.method = "umap-learn")
+```
+
+```{r echo=TRUE}
+DimPlot(tumor, reduction = "umap", group.by = "DF.classifications_0.25_0.005_867")
+```
+
+## Батч-коррекция данных
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+DimPlot(tumor, reduction = "umap", group.by = "orig.ident")
+```
+
+```{r}
+tumor <- RunHarmony(tumor, "orig.ident", assay.use = "RNA", max_iter = 20)
+```
+
+```{r echo=TRUE}
+tumor <- RunUMAP(tumor, dims = 1:18, reduction = "harmony", umap.method = "umap-learn")
+```
+
+```{r}
+DimPlot(tumor, reduction = "umap", group.by = "orig.ident")
+```
+
+
+# Кластеризация
+
+```{r echo=TRUE}
+tumor <- FindNeighbors(tumor, reduction = "harmony", dims = 1:18)
+tumor <- FindClusters(tumor, resolution = 0.5)
+```
+
+```{r echo=TRUE}
+# Look at cluster IDs of the first 5 cells
+head(Idents(tumor), 5)
+```
+
+```{r}
+plot <- DimPlot(tumor, reduction = "umap", group.by = "seurat_clusters")
+LabelClusters(plot = plot, id = 'seurat_clusters')
+```
+
+
+## нелинейное уменьшение размеров (UMAP/tSNE)
+
+```{r echo=TRUE}
+tumor <- RunTSNE(tumor, dims = 1:18, reduction = "harmony", verbose = FALSE)
+DimPlot(tumor, reduction = "tsne")
+```
+
+```{r eval=FALSE, include=FALSE}
+#saveRDS(pbmc, file = "../output/pbmc_tutorial.rds")
+```
+
+# Расчитаем показатели клеточного цикла
+
+```{r echo=TRUE}
+cc.genes.updated.2019
+```
+
+```{r eval=FALSE, include=FALSE}
+# tumor[["joined"]] <- JoinLayers(tumor[["RNA"]])
+# DefaultAssay(tumor) <- "joined"
+```
+
+```{r echo=TRUE}
+s.genes <- cc.genes.updated.2019$s.genes
+g2m.genes <- cc.genes.updated.2019$g2m.genes
+
+tumor <- CellCycleScoring(tumor, s.features = s.genes, g2m.features = g2m.genes)
+table(tumor[[]]$Phase)
+```
+
+```{r echo=FALSE}
+head(tumor@meta.data)
+```
+
+```{r echo=TRUE, fig.width=10}
+FeaturePlot(tumor, features = c("S.Score","G2M.Score"), label.size = 4, repel = T, label = T) & 
+  theme(plot.title = element_text(size=10))
+```
+
+```{r echo=TRUE, fig.width=10}
+VlnPlot(tumor, features = c("S.Score","G2M.Score")) & 
+  theme(plot.title = element_text(size=10))
+```
+
+```{r eval=FALSE, include=FALSE}
+# tumor <- RunPCA(tumor, features = c(s.genes, g2m.genes))
+# DimPlot(tumor, reduction = "pca")
+```
+
+
+```{r}
+FeaturePlot(tumor, features = c("PCNA", "TOP2A", "MCM6", "MKI67"))
+```
+
+## Разделяем дата сеты
+```{r}
+abc <- tumor
+gag <- tumor
+
+sub_tumor <- subset(x = tumor, idents = 10, invert = TRUE) # неделящиеся клетки
+sub_cyc <- subset(x = abc, idents = 10) # берём делящиеся клетки
+```
+
+```{r echo=TRUE}
+sub_tumor
+```
+
+```{r fig.height=9, fig.width=15, message=FALSE, warning=FALSE}
+# plot4 <- DimPlot(sub_tumor, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle('Manual Annotations')
+# 
+# plot5 <- DimPlot(sub_tumor, reduction = "umap", group.by = 'SingleR.Annotations', label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle('SingleR Annotations')
+# 
+# plot4 + plot5
+```
+
+```{r fig.width=10, message=FALSE, warning=FALSE}
+VlnPlot(sub_tumor, features = c("S.Score","G2M.Score")) & 
+  theme(plot.title = element_text(size=10))
+```
+
+```{r}
+sub_tumor <- NormalizeData(sub_tumor, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+```
+
+```{r}
+sub_tumor <- FindVariableFeatures(sub_tumor, selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+all.genes <- rownames(sub_tumor)
+sub_tumor <- ScaleData(sub_tumor, features = all.genes)
+```
+
+```{r}
+sub_tumor <- RunPCA(sub_tumor, features = VariableFeatures(object = sub_tumor))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+sub_tumor = RunUMAP(sub_tumor, dims = 1:20, reduction = "harmony", umap.method = "umap-learn")
+```
+
+```{r fig.width=15, message=FALSE, warning=FALSE}
+# DimPlot(sub_tumor, group.by = 'SingleR.Annotations', label = TRUE, repel = TRUE) + NoAxes()
+```
+
+```{r}
+DimPlot(sub_tumor, reduction = "umap", group.by = "seurat_clusters", label = TRUE)
+```
+
+```{r}
+ggplot(sub_tumor@meta.data, aes(x = RNA_snn_res.0.5, fill = seurat_clusters)) + geom_bar() +
+    theme_classic()
+```
+
+
+### Процессинг с делящимися клетками
+```{r echo=TRUE}
+sub_cyc
+```
+
+```{r echo=TRUE}
+sub_cyc <- NormalizeData(sub_cyc, normalization.method = "LogNormalize", scale.factor = 10000, verbose = FALSE)
+```
+
+```{r echo=TRUE}
+sub_cyc <- FindVariableFeatures(sub_cyc, selection.method = "vst", nfeatures = 2000)
+```
+
+```{r echo=TRUE}
+all.genes <- rownames(sub_cyc)
+sub_cyc <- ScaleData(sub_cyc, features = all.genes)
+```
+
+```{r include=FALSE}
+sub_cyc <- RunPCA(sub_cyc, features = VariableFeatures(object = sub_cyc))
+```
+
+```{r include=FALSE}
+sub_cyc = RunUMAP(sub_cyc, dims = 1:18, reduction = "harmony", umap.method = "umap-learn")
+```
+
+```{r echo=TRUE}
+DimPlot(sub_cyc,  label = TRUE, repel = TRUE)
+```
+
+# Label transfer
+
+```{r echo=TRUE}
+transfer.anchors <- FindTransferAnchors(reference = sub_tumor, query = sub_cyc, dims = 1:30)
+```
+
+```{r echo=TRUE}
+predictions <- TransferData(anchorset = transfer.anchors, refdata = sub_tumor$seurat_clusters, dims = 1:30)
+```
+
+```{r echo=TRUE}
+predictions
+```
+
+```{r echo=TRUE}
+sub_cyc <- AddMetaData(object = sub_cyc, metadata = predictions)
+```
+
+```{r echo=TRUE}
+DimPlot(sub_cyc, group.by = "predicted.id", label = T, repel = T)
+```
+
+```{r echo=TRUE}
+ggplot(sub_cyc@meta.data, aes(x = RNA_snn_res.0.5, fill = predicted.id)) + geom_bar() +
+    theme_classic()
+```
+
+## Подсчёт пропорций
+
+```{r}
+sub_tumor@meta.data
+unique(sub_tumor@meta.data$seurat_clusters)
+```
+
+```{r}
+cell_types <- sub_tumor@meta.data$seurat_clusters
+
+# Calculate proportions
+proportions <- table(cell_types) / length(cell_types)
+
+# Create a new data frame
+non_cycling <- data.frame(
+  cell = names(proportions),
+  proportion_of_noncyc = proportions
+)
+non_cycling <- non_cycling[-2]
+names(non_cycling) <- sub("\\.Freq", "", names(non_cycling))
+
+```
+
+
+```{r}
+sub_cyc@meta.data
+unique(sub_cyc@meta.data$predicted.id)
+```
+
+```{r}
+cell_types1 <- sub_cyc@meta.data$predicted.id
+
+# Calculate proportions
+proportions1 <- table(cell_types1) / length(cell_types1)
+
+# Create a new data frame
+cycling <- data.frame(
+  cell = names(proportions1),
+  proportion_of_cyc = proportions1
+)
+cycling <- cycling[-2]
+names(cycling) <- sub("\\.Freq", "", names(cycling))
+```
+
+```{r}
+combined <- merge(cycling, non_cycling, by = "cell")
+```
+
+```{r}
+ggplot(combined, aes(x = proportion_of_cyc, y = proportion_of_noncyc, color = cell)) +
+  geom_point() +
+  labs(x = "Cycling", y = "Noncycling") +
+  theme_minimal()
+```
+
+
+```{r}
+combined1 <- merge(non_cycling, cycling, by = "cell", all.x = TRUE)
+combined1[is.na(combined1)] <- 0
+```
+
+
+```{r}
+ggplot(combined1, aes(x = proportion_of_cyc, y = proportion_of_noncyc, color = cell)) +
+  geom_point() +
+  labs(x = "Cycling", y = "Noncycling") +
+  theme_minimal()
+```
+
+
+## Выявление дифференциально выраженных признаков (кластерных биомаркеров)
+
+```{r eval=FALSE, include=FALSE}
+# find all markers of cluster 2
+cluster2.markers <- FindMarkers(tumor, ident.1 = 2)
+head(cluster2.markers, n = 5)
+```
+
+```{r eval=FALSE, include=FALSE}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(pbmc, ident.1 = 5, ident.2 = c(0, 3))
+head(cluster5.markers, n = 5)
+```
+
+```{r eval=FALSE, include=FALSE}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+pbmc.markers <- FindAllMarkers(tumor, only.pos = TRUE)
+pbmc.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+```
+
+```{r eval=FALSE, include=FALSE}
+cluster0.markers <- FindMarkers(pbmc, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+```
+
+```{r eval=FALSE, include=FALSE}
+VlnPlot(tumor, features = c("MS4A1", "CD79A"))
+```
+
+```{r eval=FALSE, include=FALSE}
+# you can plot raw counts as well
+VlnPlot(pbmc, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
+```
+
+```{r eval=FALSE, include=FALSE}
+FeaturePlot(tumor, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
+    "CD8A"))
+```
+
+
+# Cell Annotation
+
+```{r echo=TRUE, warning=FALSE}
+# ref <- HumanPrimaryCellAtlasData()
+# 
+# ref1 <- celldex::ImmGenData()
+# 
+# ref2 <- DatabaseImmuneCellExpressionData()
+
+ref3 <- BlueprintEncodeData()
+
+# monaco.ref <- celldex::MonacoImmuneData()
+```
+
+```{r}
+# ref.data <- HumanPrimaryCellAtlasData(ensembl=TRUE, cell.ont = "all")
+```
+
+```{r echo=FALSE}
+head(as.data.frame(colData(ref3)))
+```
+
+```{r eval=FALSE, include=FALSE}
+# tumor[["joined"]] <- JoinLayers(tumor[["RNA"]])
+# DefaultAssay(tumor) <- "joined"
+```
+
+```{r echo=TRUE}
+tumor.sce <- as.SingleCellExperiment(tumor) #convert to SingleCellExperiment
+
+# test_assay <- GetAssayData(tumor)
+# ref_assay <- GetAssayData(ref.data)
+
+```
+
+```{r echo=TRUE}
+pred.tumores <- SingleR(test = tumor.sce, ref = ref3, labels = ref3$label.fine, de.method = "wilcox")
+
+#pred.tumors <- SingleR(test = tumor.sce, ref = ref1, labels = ref1$label.fine, de.method = "wilcox")
+```
+
+```{r echo=TRUE}
+pred.tumores
+```
+
+```{r echo=TRUE}
+# Summarizing the distribution:
+table(pred.tumores$labels)
+```
+
+```{r fig.height=9, fig.width=15, message=FALSE, warning=FALSE}
+tumor <- AddMetaData(tumor, pred.tumores$labels, col.name = 'SingleR.Annotations')
+
+plot1 <- DimPlot(tumor, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle('Manual Annotations')
+
+plot2 <- DimPlot(tumor, reduction = "umap", group.by = 'SingleR.Annotations', label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle('SingleR Annotations')
+
+plot1 + plot2
+```
+
+```{r fig.width=15, message=FALSE, warning=FALSE}
+plot3 <- DimPlot(tumor, reduction = "umap", group.by = 'SingleR.Annotations', label = TRUE, pt.size = 0.5) + ggtitle('SingleR Annotations')
+plot3
+```
+
+Построим, сколько клеток каждого типа клеток можно найти в каждом кластере.
+
+```{r fig.width=13, message=FALSE, warning=FALSE}
+ggplot(tumor@meta.data, aes(x = RNA_snn_res.0.5, fill = SingleR.Annotations)) + geom_bar() +
+    theme_classic()
+```
+
+## Аннотация с CHETAH
+
+```{r}
+library(CHETAH)
+```
+
+```{r}
+data('headneck_ref')
+#data('input_mel')
+```
+
+```{r}
+celltypes_hn <- headneck_ref$celltypes
+counts_hn <- assay(headneck_ref)
+```
+
+```{r}
+headneck_ref <- SingleCellExperiment(assays = list(counts = counts_hn),
+                                     colData = DataFrame(celltypes = celltypes_hn))
+```
+
+```{r}
+tumor.ce <- as.SingleCellExperiment(sub_tumor) #convert to SingleCellExperiment
+```
+
+```{r}
+input_mela <- CHETAHclassifier(input = tumor.ce,
+                              ref_cells = headneck_ref)
+```
+
+```{r}
+PlotCHETAH(input = input_mela, tree = FALSE)
+```
+
+```{r include=FALSE}
+celltypes <- input_mela$celltype_CHETAH
+```
+
+
+```{r fig.width=11}
+tumor <- AddMetaData(tumor, input_mela$celltype_CHETAH, col.name = 'CHETAN.Annotations')
+
+plot1 <- DimPlot(tumor, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle('Manual Annotations')
+
+plot2 <- DimPlot(tumor, reduction = "umap", group.by = 'CHETAN.Annotations', label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle('CHETAN Annotations')
+
+plot1 + plot2
+```
+
+
+
+
+
+
